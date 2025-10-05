@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Send, Loader2, Sparkles } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { formatDistanceToNow } from "date-fns";
 
 interface ChatInterfaceProps {
   profile: any;
@@ -13,7 +14,7 @@ interface ChatInterfaceProps {
 interface Message {
   role: "user" | "assistant";
   content: string;
-  timestamp: Date;
+  created_at: Date;
 }
 
 const ChatInterface = ({ profile }: ChatInterfaceProps) => {
@@ -21,7 +22,7 @@ const ChatInterface = ({ profile }: ChatInterfaceProps) => {
     {
       role: "assistant",
       content: `Hello ${profile.full_name}! I'm your AI companion, here to help you stay connected with your loved ones and assist with any queries. How can I help you today?`,
-      timestamp: new Date(),
+      created_at: new Date(),
     },
   ]);
   const [input, setInput] = useState("");
@@ -39,7 +40,7 @@ const ChatInterface = ({ profile }: ChatInterfaceProps) => {
     const userMessage: Message = {
       role: "user",
       content: input,
-      timestamp: new Date(),
+      created_at: new Date(),
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -60,12 +61,11 @@ const ChatInterface = ({ profile }: ChatInterfaceProps) => {
       const assistantMessage: Message = {
         role: "assistant",
         content: data.response,
-        timestamp: new Date(),
+        created_at: new Date(),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
 
-      // Check if message was routed
       if (data.message_routed) {
         toast({
           title: "Message sent!",
@@ -105,12 +105,9 @@ const ChatInterface = ({ profile }: ChatInterfaceProps) => {
                 }`}
               >
                 <p className="text-sm">{msg.content}</p>
-                <span className="text-xs opacity-70 mt-1 block">
-                  {msg.timestamp.toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </span>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {formatDistanceToNow(new Date(msg.created_at), { addSuffix: true })}
+                </div>
               </div>
             </div>
           ))}
