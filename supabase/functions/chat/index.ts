@@ -1,122 +1,167 @@
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// supabase/functions/chat/index.ts
+import { serve } from 'https://deno.land/std@0.178.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.43.4';
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+// Import Google Generative AI SDK for Deno
+import { GoogleGenerativeAI } from 'https://esm.sh/@google/generative-ai@0.2.1';
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
-
   try {
     const { message, profile_id, role } = await req.json();
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Get user's connections
-    const { data: connections } = await supabase
-      .from("connections")
-      .select(`
-        *,
-        requester:profiles!connections_requester_id_fkey(id, full_name),
-        requested:profiles!connections_requested_id_fkey(id, full_name)
-      `)
-      .eq("status", "approved")
-      .or(`requester_id.eq.${profile_id},requested_id.eq.${profile_id}`);
-
-    const connectedUsers = connections?.map((c) =>
-      c.requester_id === profile_id
-        ? { id: c.requested_id, name: c.requested.full_name }
-        : { id: c.requester_id, name: c.requester.full_name }
-    ) || [];
-
-    // Build system prompt
-    const systemPrompt = `You are an empathetic AI companion for space communication. You help ${role === "astronaut" ? "astronauts" : "relatives"} stay connected with their loved ones.
-
-Connected users: ${connectedUsers.map(u => u.name).join(", ") || "None yet"}
-
-When users want to send a message to someone, they'll say things like:
-- "Tell [name] that..."
-- "Send a message to [name]..."
-- "Let [name] know..."
-
-When you detect message routing intent:
-1. Extract the recipient's name and the message content
-2. Respond with a confirmation that you'll deliver the message
-3. Include [ROUTE_MESSAGE: recipient_name | message_content] at the end
-
-For general queries, provide helpful and empathetic responses. Be warm, supportive, and understanding of the unique challenges of space communication.`;
-
-    // Call Lovable AI
-    const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: message },
-        ],
-      }),
-    });
-
-    const aiData = await aiResponse.json();
-    const response = aiData.choices[0].message.content;
-
-    // Check if message should be routed
-    const routeMatch = response.match(/\[ROUTE_MESSAGE:\s*(.+?)\s*\|\s*(.+?)\]/);
-    let messageRouted = false;
-    let recipientName = "";
-
-    if (routeMatch) {
-      const [, targetName, messageContent] = routeMatch;
-      const recipient = connectedUsers.find(
-        (u) => u.name.toLowerCase().includes(targetName.toLowerCase())
+    if (!message || !profile_id) {
+      return new Response(
+        JSON.stringify({ error: 'Missing message or profile_id' }),
+        { headers: { 'Content-Type': 'application/json' }, status: 400 }
       );
+    }
 
-      if (recipient) {
-        await supabase.from("routed_messages").insert({
-          sender_id: profile_id,
-          recipient_id: recipient.id,
-          content: messageContent.trim(),
-        });
-        messageRouted = true;
-        recipientName = recipient.name;
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: req.headers.get('Authorization')! },
+        },
+      }
+    );
+
+    // Initialize Gemini client
+    const genAI = new GoogleGenerativeAI(Deno.env.get('GOOGLE_GEMINI_API_KEY') ?? '');
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    // Empathetic and routing-aware prompt
+    const prompt = `
+You are an empathetic AI companion in the "Stellar Link" app, designed for astronauts on space missions and their relatives on Earth. 
+The user is a ${role} (astronaut or relative). Respond warmly, supportively, and empathetically to their message, acknowledging their feelings or situation.
+
+Key rules:
+1. If the message is a general question or statement (e.g., "How are you?", "I feel lonely", "What's the mission like?"), provide a helpful, empathetic response. Do not route it.
+2. If the message seems directed to a specific family member (e.g., "Tell my mom I love her", "Send a message to my dad saying I'm safe", "I want to tell John about my day"), 
+   - Extract the intended recipient's name or relationship (e.g., "mom", "dad", "John").
+   - Respond empathetically confirming you'll route the message (e.g., "That's wonderful to hear. I'll make sure your mom gets that message.").
+   - In your JSON output, set "intended_recipient_name" to the extracted name (e.g., "mom").
+3. Always keep responses concise (under 150 words), positive, and relevant to space travel/family bonds.
+4. Output ONLY valid JSON in this exact format: 
+   {
+     "ai_reply": "Your empathetic response here",
+     "intended_recipient_name": "extracted name or null"
+   }
+   Do not add extra text.
+
+User message: "${message}"
+    `;
+
+    // Generate response from Gemini
+    let aiOutput;
+    try {
+      const result = await model.generateContent(prompt);
+      const responseText = await result.response.text();
+      aiOutput = JSON.parse(responseText);  // Parse the JSON from Gemini's output
+    } catch (geminiError) {
+      console.error('Gemini API Error:', geminiError);
+      // Fallback response if Gemini fails
+      aiOutput = {
+        ai_reply: "I'm here for you. It sounds like you're going through something—tell me more, and I'll listen.",
+        intended_recipient_name: null
+      };
+    }
+
+    const aiResponseContent = aiOutput.ai_reply;
+    const potentialRecipientName = aiOutput.intended_recipient_name;
+
+    let messageRouted = false;
+    let recipientName = null;
+
+    // --- Message Routing Logic (unchanged from before) ---
+    if (potentialRecipientName) {
+      // Search for the intended recipient among approved connections
+      const { data: connectionsData, error: connectionsError } = await supabaseClient
+        .from("connections")
+        .select(
+          `
+          id,
+          status,
+          requester:profiles!connections_requester_id_fkey(id, full_name, role, relationship, mission_name),
+          requested:profiles!connections_requested_id_fkey(id, full_name, role, relationship, mission_name)
+        `
+        )
+        .or(`requester_id.eq.${profile_id},requested_id.eq.${profile_id}`);
+
+      if (connectionsError) {
+        console.error("Error fetching connections:", connectionsError);
+        // Adjust AI response for error
+        aiResponseContent = "I understand what you're trying to say, but I had trouble checking your connections. Let's try again soon.";
+      } else {
+        let foundRecipientProfile = null;
+
+        for (const conn of connectionsData || []) {
+          if (conn.status === "approved") {
+            const otherUser  = conn.requester.id === profile_id ? conn.requested : conn.requester;
+
+            // Match by name or relationship
+            const nameMatch = otherUser .full_name.toLowerCase().includes(potentialRecipientName.toLowerCase());
+            const relationshipMatch = otherUser .relationship?.toLowerCase().includes(potentialRecipientName.toLowerCase());
+
+            if (nameMatch || relationshipMatch) {
+              foundRecipientProfile = otherUser ;
+              break;
+            }
+          }
+        }
+
+        if (foundRecipientProfile) {
+          const recipientId = foundRecipientProfile.id;
+
+          // Insert routed message
+          const { error: insertError } = await supabaseClient
+            .from("routed_messages")
+            .insert({
+              sender_id: profile_id,
+              recipient_id: recipientId,
+              content: message,
+            });
+
+          if (insertError) {
+            console.error("Error inserting routed message:", insertError);
+            aiResponseContent = "I hear you, and your words mean a lot. There was a small glitch sending it—I'll help you try again.";
+          } else {
+            messageRouted = true;
+            recipientName = foundRecipientProfile.full_name;
+            // Gemini already crafted a confirming response, but we can enhance if needed
+            aiResponseContent = `${aiResponseContent} Your message has been sent to ${recipientName}. They'll see it soon.`;
+          }
+        } else {
+          aiResponseContent = `${aiResponseContent} I couldn't find a connection for "${potentialRecipientName}". Let's build that link together first.`;
+        }
       }
     }
 
-    // Store conversation
-    await supabase.from("ai_conversations").insert({
-      user_id: profile_id,
-      message,
-      response: response.replace(/\[ROUTE_MESSAGE:.+?\]/, "").trim(),
+    // --- Save AI Conversation ---
+    await supabaseClient.from("ai_conversations").insert({
+      user_id: profile_id,  // Note: This is profile_id, as per multi-profile setup
+      message: message,
+      response: aiResponseContent,
     });
-
-    // Clean response from routing markers
-    const cleanResponse = response.replace(/\[ROUTE_MESSAGE:.+?\]/, "").trim();
 
     return new Response(
       JSON.stringify({
-        response: cleanResponse,
+        response: aiResponseContent,
         message_routed: messageRouted,
         recipient_name: recipientName,
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        headers: { "Content-Type": "application/json" },
+      }
     );
   } catch (error) {
-    console.error("Error in chat function:", error);
+    console.error("Edge Function Error:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ error: error.message || "An unexpected error occurred." }),
+      {
+        headers: { "Content-Type": "application/json" },
+        status: 500,
+      }
     );
   }
 });
