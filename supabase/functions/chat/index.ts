@@ -67,7 +67,7 @@ User message: "${message}"
       };
     }
 
-    const aiResponseContent = aiOutput.ai_reply;
+    let aiResponseContent = aiOutput.ai_reply;
     const potentialRecipientName = aiOutput.intended_recipient_name;
 
     let messageRouted = false;
@@ -97,14 +97,20 @@ User message: "${message}"
 
         for (const conn of connectionsData || []) {
           if (conn.status === "approved") {
-            const otherUser  = conn.requester.id === profile_id ? conn.requested : conn.requester;
+            // Extract the profiles from the foreign key relationship
+            const requesterProfile = Array.isArray(conn.requester) ? conn.requester[0] : conn.requester;
+            const requestedProfile = Array.isArray(conn.requested) ? conn.requested[0] : conn.requested;
+            
+            const otherUser = requesterProfile?.id === profile_id ? requestedProfile : requesterProfile;
+
+            if (!otherUser) continue;
 
             // Match by name or relationship
-            const nameMatch = otherUser .full_name.toLowerCase().includes(potentialRecipientName.toLowerCase());
-            const relationshipMatch = otherUser .relationship?.toLowerCase().includes(potentialRecipientName.toLowerCase());
+            const nameMatch = otherUser.full_name?.toLowerCase().includes(potentialRecipientName.toLowerCase());
+            const relationshipMatch = otherUser.relationship?.toLowerCase().includes(potentialRecipientName.toLowerCase());
 
             if (nameMatch || relationshipMatch) {
-              foundRecipientProfile = otherUser ;
+              foundRecipientProfile = otherUser;
               break;
             }
           }
@@ -157,7 +163,7 @@ User message: "${message}"
   } catch (error) {
     console.error("Edge Function Error:", error);
     return new Response(
-      JSON.stringify({ error: error.message || "An unexpected error occurred." }),
+      JSON.stringify({ error: (error as Error).message || "An unexpected error occurred." }),
       {
         headers: { "Content-Type": "application/json" },
         status: 500,
